@@ -1,0 +1,273 @@
+import json
+import pickle
+import re
+import time
+from pathlib import Path
+
+from IPython.display import JSON, clear_output, display
+from rank_bm25 import BM25Okapi
+from tqdm import tqdm
+
+from rag.config import EFS_DIR, ROOT_DIR
+from rag.embed import get_embedding_model
+from rag.create_index import load_index
+from rag.idx_rerank import custom_predict, get_reranked_indices
+from rag.idx_search import lexical_search, semantic_search
+from rag.utilities import get_client, get_num_tokens, trim
+
+
+def response_stream(chat_completion):
+    for chunk in chat_completion:
+        content = chunk.choices[0].delta.content
+        if content is not None:
+            yield content
+
+
+def prepare_response(chat_completion, stream):
+    if stream:
+        return response_stream(chat_completion)
+    else:
+        return chat_completion.choices[0].message.content
+
+
+def send_request(
+    llm,
+    messages,
+    max_tokens=None,
+    temperature=0.0,
+    stream=False,
+    max_retries=1,
+    retry_interval=60,
+):
+    retry_count = 0
+    client = get_client(llm=llm)
+    while retry_count <= max_retries:
+        try:
+            chat_completion = client.chat.completions.create(
+                model=llm,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=stream,
+                messages=messages,
+            )
+            return prepare_response(chat_completion, stream=stream)
+
+        except Exception as e:
+            print(f"Exception: {e}")
+            time.sleep(retry_interval)  # default is per-minute rate limits
+            retry_count += 1
+    return ""
+
+
+def generate_response(
+    llm,
+    max_tokens=None,
+    temperature=0.0,
+    stream=False,
+    system_content="",
+    assistant_content="",
+    user_content="",
+    max_retries=1,
+    retry_interval=60,
+):
+    """Generate response from an LLM."""
+    messages = [
+        {"role": role, "content": content}
+        for role, content in [
+            ("system", system_content),
+            ("assistant", assistant_content),
+            ("user", user_content),
+        ]
+        if content
+    ]
+    return send_request(
+        llm, messages, max_tokens, temperature, stream, max_retries, retry_interval
+    )
+
+
+class QueryAgent:
+    def __init__(
+        self,
+        embedding_model_name="thenlper/gte-base",
+        chunks=None,
+        lexical_index=None,
+        reranker=None,
+        llm="meta-llama/Llama-2-70b-chat-hf",
+        temperature=0.0,
+        max_context_length=4096,
+        system_content="",
+        assistant_content="",
+    ):
+
+        self.embedding_model = get_embedding_model(
+            embedding_model_name=embedding_model_name,
+            model_kwargs={"device": "cuda"},
+            encode_kwargs={"device": "cuda", "batch_size": 100},
+        )
+
+
+        self.chunks = chunks
+        self.lexical_index = lexical_index
+
+        self.reranker = reranker
+
+        self.llm = llm
+        self.temperature = temperature
+        self.context_length = int(
+            0.5 * max_context_length
+        ) - get_num_tokens(  # 50% of total context reserved for input
+            system_content + assistant_content
+        )
+        self.max_tokens = int(
+            0.5 * max_context_length
+        )  # max sampled output (the other 50% of total context)
+        self.system_content = system_content
+        self.assistant_content = assistant_content
+
+    def __call__(
+        self,
+        query,
+        num_chunks=5,
+        lexical_search_k=1,
+        rerank_threshold=0.2,
+        rerank_k=7,
+        stream=True,
+    ):
+        context_results = semantic_search(
+            query=query, embedding_model=self.embedding_model, k=num_chunks
+        )
+
+        if self.lexical_index:
+            lexical_context = lexical_search(
+                index=self.lexical_index, query=query, chunks=self.chunks, k=lexical_search_k
+            )
+            context_results[lexical_search_k:lexical_search_k] = lexical_context
+
+        if self.reranker:
+            predicted_tag = custom_predict(
+                inputs=[query], classifier=self.reranker, threshold=rerank_threshold
+            )[0]
+            if predicted_tag != "other":
+                sources = [item["source"] for item in context_results]
+                reranked_indices = get_reranked_indices(sources, predicted_tag)
+                context_results = [context_results[i] for i in reranked_indices]
+            context_results = context_results[:rerank_k]
+
+        document_ids = [item["id"] for item in context_results]
+        context = [item["text"] for item in context_results]
+        sources = set([item["source"] for item in context_results])
+        user_content = f"query: {query}, context: {context}"
+        answer = generate_response(
+            llm=self.llm,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            stream=stream,
+            system_content=self.system_content,
+            assistant_content=self.assistant_content,
+            user_content=trim(user_content, self.context_length),
+        )
+
+        result = {
+            "question": query,
+            "sources": sources,
+            "document_ids": document_ids,
+            "answer": answer,
+            "llm": self.llm,
+        }
+        return result
+
+
+def generate_responses(
+    experiment_name,
+    chunk_size,
+    chunk_overlap,
+    num_chunks,
+    embedding_model_name,
+    embedding_dim,
+    use_lexical_search,
+    lexical_search_k,
+    use_reranking,
+    rerank_threshold,
+    rerank_k,
+    llm,
+    temperature,
+    max_context_length,
+    system_content,
+    assistant_content,
+    docs_dir,
+    experiments_dir,
+    references_fp,
+    num_samples=None,
+    sql_dump_fp=None,
+):
+    chunks = load_index(
+        embedding_model_name=embedding_model_name,
+        embedding_dim=embedding_dim,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        docs_dir=docs_dir,
+        sql_dump_fp=sql_dump_fp,
+    )
+
+    lexical_index = None
+    if use_lexical_search:
+        texts = [re.sub(r"[^a-zA-Z0-9]", " ", chunk[1]).lower().split() for chunk in chunks]
+        lexical_index = BM25Okapi(texts)
+        
+    reranker = None
+    if use_reranking:
+        reranker_fp = Path(EFS_DIR, "reranker.pkl")
+        with open(reranker_fp, "rb") as file:
+            reranker = pickle.load(file)
+            
+    agent = QueryAgent(
+        embedding_model_name=embedding_model_name,
+        chunks=chunks,
+        lexical_index=lexical_index,
+        reranker=reranker,
+        llm=llm,
+        temperature=temperature,
+        system_content=system_content,
+        assistant_content=assistant_content,
+    )
+
+    results = []
+    with open(Path(references_fp), "r") as f:
+        questions = [item["question"] for item in json.load(f)][:num_samples]
+    for query in tqdm(questions):
+        result = agent(
+            query=query,
+            num_chunks=num_chunks,
+            lexical_search_k=lexical_search_k,
+            rerank_threshold=rerank_threshold,
+            rerank_k=rerank_k,
+            stream=False,
+        )
+        results.append(result)
+        clear_output(wait=True)
+        display(JSON(json.dumps(result, indent=2)))
+
+    responses_fp = Path(ROOT_DIR, experiments_dir, "responses", f"{experiment_name}.json")
+    responses_fp.parent.mkdir(parents=True, exist_ok=True)
+    config = {
+        "experiment_name": experiment_name,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "num_chunks": num_chunks,
+        "embedding_model_name": embedding_model_name,
+        "llm": llm,
+        "temperature": temperature,
+        "max_context_length": max_context_length,
+        "system_content": system_content,
+        "assistant_content": assistant_content,
+        "docs_dir": str(docs_dir),
+        "experiments_dir": str(experiments_dir),
+        "references_fp": str(references_fp),
+        "num_samples": len(questions),
+    }
+    responses = {
+        "config": config,
+        "results": results,
+    }
+    with open(responses_fp, "w") as fp:
+        json.dump(responses, fp, indent=4)
