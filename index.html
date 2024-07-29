@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Home Page</title>
+<link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+<style>
+  body {
+    padding-top: 56px;
+    font-family: Arial, sans-serif;
+    background-color: #e9ecef;
+  }
+  footer {
+    padding: 3rem 0;
+  }
+</style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg navbar-light bg-light fixed-top">
+    <a class="navbar-brand" href="/home">ARC</a>
+    <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarResponsive" aria-controls="navbarResponsive" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="navbarResponsive">
+      <ul class="navbar-nav ml-auto">
+        <li class="nav-item"><a class="nav-link" href="/home">Home</a></li>
+        <li class="nav-item"><a class="nav-link" href="/sys/logout">Logout</a></li>
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle" href="#" id="chatDropdown" role="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+            Chat
+          </a>
+          <div class="dropdown-menu" aria-labelledby="chatDropdown">
+            <a class="dropdown-item" href="/group_chats">Group Chat</a>
+            <a class="dropdown-item" href="/private_chats">Private Chat</a>
+          </div>
+        </li>
+        <li class="nav-item"><a class="nav-link" href="/post">Post</a></li>
+        <li class="nav-item"><a class="nav-link" href="#">Profile</a></li>
+      </ul>
+    </div>
+  </nav>
+  <div class="container">
+    <div class="jumbotron mt-4">
+      <h1 class="display-4">We are ARC</h1>
+      <p class="lead">Explore and connect with new friends.</p>
+      <hr class="my-4">
+    </div>
+  </div>
+  <footer class="bg-light text-center">
+    <div class="container">
+      <p>&copy; All rights reserved.</p>
+    </div>
+  </footer>
+  <script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"></script>
+  <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+</body>
+</html>
